@@ -1,5 +1,6 @@
 use rusqlite::Connection;
 use std::env;
+use std::rc::Rc;
 
 #[derive(Debug)]
 struct Task {
@@ -8,9 +9,85 @@ struct Task {
     done: bool,
 }
 
-fn main() -> rusqlite::Result<()> {
-    init_db()?;
+struct App {
+    db: Rc<Connection>,
+}
 
+impl App {
+    fn new() -> Self {
+        let conn = Rc::new(Connection::open("./database.sqlite").expect("Cannot connect to database."));
+        {
+            let conn = conn.clone();
+            let mut stmt =
+                conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='tasks'").expect("Cannot find tasks table.");
+            let table_exists = stmt.exists([]).unwrap();
+
+            if !table_exists {
+                conn.execute(
+                    "CREATE TABLE tasks (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  task TEXT NOT NULL,
+                  done BOOLEAN NOT NULL CHECK (done IN (0, 1))
+              );",
+                    (),
+                ).expect("Cannot create tasks table.");
+            }
+        }
+        Self { db: conn }
+    }
+
+    fn add_task(&self, tasks: &[String]) {
+        for task in tasks {
+            self.db
+                .execute("INSERT INTO tasks (task, done) VALUES (?1, ?2)", (task, 0))
+                .unwrap();
+        }
+    }
+
+    fn edit_task(&self, task: &String, id: &String) {
+        self.db
+            .execute("UPDATE tasks SET task = ?1 WHERE id = ?2", (task, id))
+            .unwrap();
+    }
+
+    fn list_tasks(&self) {
+        let mut stmt = self.db.prepare("SELECT id, task, done FROM tasks").unwrap();
+        let task_iter = stmt
+            .query_map([], |row| {
+                Ok(Task {
+                    id: row.get(0)?,
+                    task: row.get(1)?,
+                    done: row.get(2)?,
+                })
+            })
+            .unwrap();
+        for task in task_iter {
+            let task = task.unwrap();
+            let mut text = format!("{}", task.task);
+            if task.done {
+                text = format!("\x1B[9m{}\x1B[0m", task.task);
+            }
+            println!("{}. {}", task.id, text);
+        }
+    }
+
+    fn done_tasks(&self, ids: &[String]) {
+        for id in ids {
+            self.db
+                .execute("UPDATE tasks SET done = 1 WHERE id = ?1", (id,))
+                .unwrap();
+        }
+    }
+
+    fn remove_task(&self, id: &String) {
+        self.db
+            .execute("DELETE FROM tasks WHERE id = ?1", (id,))
+            .unwrap();
+    }
+}
+
+fn main() -> rusqlite::Result<()> {
+    let app = App::new();
     let args: Vec<String> = env::args().skip(1).collect();
 
     let default_command = "help".to_string();
@@ -19,96 +96,27 @@ fn main() -> rusqlite::Result<()> {
     match command.as_str() {
         "add" => {
             let tasks = args.get(1..).unwrap();
-            add_task(tasks);
+            app.add_task(tasks);
         }
         "edit" => {
             let id = args.get(1).unwrap();
             let task = args.get(2).unwrap();
-            edit_task(task, id);
+            app.edit_task(task, id);
         }
         "list" => {
-            list_tasks();
-        },
+            app.list_tasks();
+        }
         "done" => {
             let ids = args.get(1..).unwrap();
-            done_tasks(ids);
-        },
+            app.done_tasks(ids);
+        }
         "rm" => {
             let id = args.get(1).unwrap();
-            remove_task(id);
-        },
+            app.remove_task(id);
+        }
         "" | "help" | _ => {
             println!("{}", HELP);
         }
-    }
-    Ok(())
-}
-
-fn add_task(tasks: &[String]) {
-    let conn = Connection::open("./database.sqlite").unwrap();
-    for task in tasks {
-        conn.execute("INSERT INTO tasks (task, done) VALUES (?1, ?2)", (task, 0))
-            .unwrap();
-    }
-}
-
-fn edit_task(task: &String, id: &String) {
-    let conn = Connection::open("./database.sqlite").unwrap();
-    conn.execute("UPDATE tasks SET task = ?1 WHERE id = ?2", (task, id))
-        .unwrap();
-}
-
-fn list_tasks() {
-    let conn = Connection::open("./database.sqlite").unwrap();
-    let mut stmt = conn.prepare("SELECT id, task, done FROM tasks").unwrap();
-    let task_iter = stmt
-        .query_map([], |row| {
-            Ok(Task {
-                id: row.get(0)?,
-                task: row.get(1)?,
-                done: row.get(2)?,
-            })
-        })
-        .unwrap();
-    for task in task_iter {
-        let task = task.unwrap();
-        let mut text = format!("{}", task.task);
-        if task.done {
-            text = format!("\x1B[9m{}\x1B[0m", task.task);
-        }
-        println!("{}. {}", task.id, text);
-    }
-}
-
-fn done_tasks(ids: &[String]) {
-    let conn = Connection::open("./database.sqlite").unwrap();
-    for id in ids {
-        conn.execute("UPDATE tasks SET done = 1 WHERE id = ?1", (id,))
-            .unwrap();
-    }
-}
-
-fn remove_task(id: &String) {
-    let conn = Connection::open("./database.sqlite").unwrap();
-    conn.execute("DELETE FROM tasks WHERE id = ?1", (id,))
-            .unwrap();
-}
-
-fn init_db() -> rusqlite::Result<()> {
-    let conn = Connection::open("./database.sqlite")?;
-    let mut stmt =
-        conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='tasks'")?;
-    let table_exists = stmt.exists([])?;
-
-    if !table_exists {
-        conn.execute(
-            "CREATE TABLE tasks (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              task TEXT NOT NULL,
-              done BOOLEAN NOT NULL CHECK (done IN (0, 1))
-          );",
-            (),
-        )?;
     }
     Ok(())
 }
